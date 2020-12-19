@@ -1,0 +1,2 @@
+*.bat
+!get-ts-comments.bat
