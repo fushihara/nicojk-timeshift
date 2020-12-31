@@ -3,4 +3,4 @@
 setlocal
 cd /D %~dp0
 
-python ./get-new-jikkyo-comments.py timeshift --cookie user_session_0000_0123456789abcdef
+python ./get-new-jikkyo-comments.py timeshift --databaseDir ".\new-nico-jikkyo-logs" --cookie user_session_0000_0123456789abcdef

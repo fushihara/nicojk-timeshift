@@ -72,13 +72,14 @@ class TimeShiftLog(Model):
 
 class JkTxt:
     # tsファイルから日時とチャンネルを読み込み、ログのsqliteファイルから、コメントのjkTxtを作成し、指定のパスに設置する
-    def __init__(self,tsFilePath:str,exportJkPath:str):
+    def __init__(self,tsFilePath:str,sqliteBaseDir:str, exportJkPath:str):
         self.tsFilePath = tsFilePath
         self.exportJkPath = exportJkPath
+        self.sqliteBaseDir = sqliteBaseDir
     def getData(self):
         (tsStartTime,tsDuration,serviceId) = self._getTsFileInfo()
         serviceData = self._getServiceIdData(serviceId)
-        sqliteFilePath = f"./logs-nicolive/{serviceData.sqliteFileName}.sqlite3"
+        sqliteFilePath = os.path.join(self.sqliteBaseDir,f"{serviceData.sqliteFileName}.sqlite3")
         chats = self._getCommentDatas(sqliteFilePath,tsStartTime,tsDuration.total_seconds())
         logTextTime = f"{tsStartTime:%Y/%m/%d %H:%M:%S} ～ {int(tsDuration.total_seconds() / 60)}分{int(tsDuration.total_seconds() % 60):02}秒"
         if len(chats) == 0:
@@ -194,10 +195,11 @@ class ParseTs:
             pos += (188*addType)
         raise Exception(f"PAT TOTが見つかりません")
 class DatabaseClass:
-    @staticmethod
-    def getSavedTimeShiftLogs(jkId:int) -> typing.List[TimeShiftLog]:
-        sqliteFileName = jkIdToSqliteFileName(jkId)
-        db = SqliteDatabase(f"./logs-nicolive/{sqliteFileName}.sqlite3")
+    def __init__(self,saveDirPath:str) -> None:
+        self.saveDirPath = saveDirPath
+        
+    def getSavedTimeShiftLogs(self,jkId:int) -> typing.List[TimeShiftLog]:
+        db = self._getDatabaseObject(jkId)
         result = [] # type: typing.List[TimeShiftLog]
         with db.bind_ctx([TimeShiftLog]):
             db.create_tables([TimeShiftLog])
@@ -205,10 +207,8 @@ class DatabaseClass:
                 result.append(log)
         return result
 
-    @staticmethod
-    def saveTimeShiftLog(jkId:int,lvAddress:str,title:str):
-        sqliteFileName = jkIdToSqliteFileName(jkId)
-        db = SqliteDatabase(f"./logs-nicolive/{sqliteFileName}.sqlite3")
+    def saveTimeShiftLog(self,jkId:int,lvAddress:str,title:str):
+        db = self._getDatabaseObject(jkId)
         with db.bind_ctx([TimeShiftLog]):
             db.create_tables([TimeShiftLog])
             (TimeShiftLog
@@ -218,10 +218,8 @@ class DatabaseClass:
                     preserve=[TimeShiftLog.lastCheckDate] )
                 .execute())
 
-    @staticmethod
-    def saveXmlChat(jkId:int,lvAddress:str,chatList:typing.List):
-        sqliteFileName = jkIdToSqliteFileName(jkId)
-        db = SqliteDatabase(f"./logs-nicolive/{sqliteFileName}.sqlite3")
+    def saveXmlChat(self,jkId:int,lvAddress:str,chatList:typing.List):
+        db = self._getDatabaseObject(jkId)
         with db.bind_ctx([Chat,TimeShiftLog]):
             db.create_tables([Chat,TimeShiftLog])
         insertManyVal :typing.List = []
@@ -302,13 +300,24 @@ class DatabaseClass:
                     insertSet = insertManyVal[idx:idx+insertLimit]
                     insertResult = (Chat.insert_many(insertSet).on_conflict_ignore().execute())
                     totalInsertCount += insertResult
+    def _getDatabaseObject(self,jkId:int) -> SqliteDatabase:
+        r = [i.sqliteFileName for i in channelDefs if i.jkNumber == jkId]
+        fileName = ""
+        if len(r) != 1:
+            raise Exception(f"{jkId} not found")
+        else:
+            fileName = f"{r[0]}.sqlite3"
+        fullPath = os.path.join(self.saveDirPath,fileName)
+        db = SqliteDatabase(fullPath)
+        return db
 
 class DownloadTimeShift:
-    def __init__(self,cookie:str,jkId:int,lvAddress:str) -> None:
+    def __init__(self,cookie:str,sqliteBaseDir:str,jkId:int,lvAddress:str) -> None:
         self.cookie = cookie # type: str
         self.jkId = jkId # type: int
         self.lvAddress = lvAddress # type: str
         self.watchPageJson = "" # type: types.Any
+        self.sqliteBaseDir = sqliteBaseDir
     async def start(self):
         url = f"https://api.cas.nicovideo.jp/v1/services/live/programs/{self.lvAddress}"
         req = urllib.request.Request(url)
@@ -397,9 +406,9 @@ class DownloadTimeShift:
             logger.info(f"jk{self.jkId} {title} から {len(chatObjList)} 件のコメントを受信")
         else:
             logger.info(f"jk{self.jkId} {title} から {len(chatObjList)} 件のコメントを受信 (放送中)")
-        DatabaseClass().saveXmlChat(self.jkId,self.lvAddress,chatObjList)
+        DatabaseClass(self.sqliteBaseDir).saveXmlChat(self.jkId,self.lvAddress,chatObjList)
         if saveTimeShiftLog == True:
-            DatabaseClass().saveTimeShiftLog(self.jkId,self.lvAddress,title)
+            DatabaseClass(self.sqliteBaseDir).saveTimeShiftLog(self.jkId,self.lvAddress,title)
     def _getWatchPage(self):
         url = f"https://live2.nicovideo.jp/watch/{self.lvAddress}"
         headers = {
@@ -437,12 +446,6 @@ def getAllTimeshifts(jkId:int) -> typing.List[str]: # [ lv123456 , lv 987654]
                 break
             page += 1
     return result
-def jkIdToSqliteFileName(jkId:int) -> str:
-    r = [i.sqliteFileName for i in channelDefs if i.jkNumber == jkId]
-    if len(r) != 1:
-        raise Exception(f"{jkId} not found")
-    else:
-        return r[0]
 
 async def getTimeshift2(args):
     targetJkIds = [] # type: List[int]
@@ -451,7 +454,7 @@ async def getTimeshift2(args):
     else:
         targetJkIds = [i.jkNumber for i in channelDefs if i.cliName in args.station]
     for jkId in targetJkIds:
-        downloadedLog = DatabaseClass().getSavedTimeShiftLogs(jkId) # 既に保存済みのリストを取得
+        downloadedLog = DatabaseClass(args.databaseDir).getSavedTimeShiftLogs(jkId) # 既に保存済みのリストを取得
         if args.allSave == True:
             # all downloadがtrueの場合は、保存済みリストを削除
             downloadedLog = [] # type: typing.List[TimeShiftLog]
@@ -461,14 +464,14 @@ async def getTimeshift2(args):
             if 0 < len(logData):
                 logger.info(f"{logData[0].title} ({logData[0].lvId}) はDL済みなのでスキップします")
                 continue
-            await DownloadTimeShift(args.cookie,jkId,timeShiftThread).start()
+            await DownloadTimeShift(args.cookie,args.databaseDir,jkId,timeShiftThread).start()
 
 def getTimeshift(args):
     asyncio.run(getTimeshift2(args))
 
 def getFromTsFile(args):
     for file in args.file:
-        JkTxt(file,args.jkDir).getData()
+        JkTxt(file,args.databaseDir,args.jkDir).getData()
 
 def isFile(path:str) -> str:
     if os.path.isfile(path) == False:
@@ -476,17 +479,19 @@ def isFile(path:str) -> str:
     return path
 
 if __name__ == "__main__":
+    defaultSqliteBaseDir = "./logs-new-nicolive"
     parser = argparse.ArgumentParser(description='ニコニコ実況過去ログツール')
     subparsers = parser.add_subparsers()
     # 過去ログ取得
     parser_add = subparsers.add_parser('timeshift', help='ニコ生のタイムシフトから全チャンネルのログを取得する。プレミアムアカウント必須')
+    parser_add.add_argument("-d","--databaseDir",action="store",type=str,required=False,default=defaultSqliteBaseDir,help="sqlite3ファイルを保存するフォルダのパス")
     parser_add.add_argument("-c","--cookie",action="store",type=str,required=True,help="cookieの値 user_session_123456_0123abcedf... の形式を想定")
-    stationChoise = [i.cliName for i in channelDefs]
-    parser_add.add_argument("-s","--station",action="append",type=str,choices=stationChoise,help="取得対象の局名 公式のチャンネルのみ対応。指定なしの場合は全局")
+    parser_add.add_argument("-s","--station",action="append",type=str,choices=[i.cliName for i in channelDefs],help="取得対象の局名 公式のチャンネルのみ対応。指定なしの場合は全局")
     parser_add.add_argument("-a","--allSave",action="store_true",help="既にDLしたタイムシフトも全て再取得します。個別のコメントに上書きはしないので、タイムシフトが何らかの理由でコメント数が増えた時に使う事を想定")
     parser_add.set_defaults(handler=getTimeshift)
     # tsファイル指定
     parser_add = subparsers.add_parser('ts', help='指定のtsファイルから自動的にコメントファイルを作成する。複数ファイル対応')
+    parser_add.add_argument("-d","--databaseDir",action="store",type=str,required=False,default=defaultSqliteBaseDir,help="sqlite3ファイルを保存するフォルダのパス")
     parser_add.add_argument("file",action="store",type=isFile,nargs='+',help="tsファイルのパス 複数指定対応")
     parser_add.add_argument("-j","--jkDir",action="store",type=str,default="jk-txt",help="実況のtxtファイルを作成するディレクトリのパス。このパスの中にjk0 の局別フォルダを作り、その中に123456780.txt のテキストファイルを作成する")
     parser_add.set_defaults(handler=getFromTsFile)
